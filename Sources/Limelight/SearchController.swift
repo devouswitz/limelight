@@ -14,7 +14,7 @@ final class SearchPanel: NSPanel {
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: SearchController.width, height: SearchController.headerHeight),
-                   styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+                   styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isFloatingPanel = true
         level = .modalPanel
@@ -156,6 +156,11 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         content.translatesAutoresizingMaskIntoConstraints = false
         content.onDragEnd = { [weak self] in self?.savePosition() }
         contentRoot = content
+        // Nothing inside (a selected last row, the scroller) may draw past the rounded glass.
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 26
+        content.layer?.cornerCurve = .continuous
+        content.layer?.masksToBounds = true
 
         modeIcon.symbolConfiguration = .init(pointSize: 19, weight: .medium)
         modeIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -783,7 +788,13 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     /// window server, so it does not appear in the image. With `typeKeys`, the query arrives as
     /// posted key events instead, which exercises the real input path; "↓" stands for the down arrow.
     func snapshot(query: String, mode: SearchMode, typeKeys: Bool, to path: String, completion: @escaping () -> Void) {
-        show()
+        if typeKeys {
+            show()
+        } else {
+            // Shown without taking keyboard focus, so a test run never captures what someone is typing.
+            position()
+            panel.orderFrontRegardless()
+        }
         setMode(mode, search: false)
         if typeKeys {
             for (n, ch) in query.enumerated() {
@@ -795,11 +806,17 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             }
         } else {
             field.stringValue = query
-            field.currentEditor()?.moveToEndOfDocument(nil)
             search(query)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [self] in
             print("panelIsKey=\(panel.isKeyWindow) field=\"\(field.stringValue)\" selectedRow=\(table.selectedRow) rows=\(rows.count) completion=\"\(self.completion.stringValue)\"")
+            if let real = windowServerImage() {
+                let url = URL(fileURLWithPath: path.replacingOccurrences(of: ".png", with: "-window.png"))
+                try? NSBitmapImageRep(cgImage: real).representation(using: .png, properties: [:])?.write(to: url)
+                print("window image \(real.width)x\(real.height)")
+            } else {
+                print("window image unavailable")
+            }
             var inner = panel.contentView
             if #available(macOS 26.0, *), let glass = inner as? NSGlassEffectView { inner = glass.contentView }
             guard let view = inner, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { completion(); return }
@@ -843,6 +860,16 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             print("reopened at \(panel.frame.origin)")
             completion()
         }
+    }
+
+    /// The window as the window server composites it, shadow included. Diagnostic only.
+    /// CGWindowListCreateImage is gone from the SDK but still answers at runtime for an app's own windows.
+    func windowServerImage() -> CGImage? {
+        typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return nil }
+        let capture = unsafeBitCast(sym, to: Capture.self)
+        // kCGWindowListOptionIncludingWindow = 8; image option 0 keeps the shadow framing.
+        return capture(.null, 8, UInt32(panel.windowNumber), 0)?.takeRetainedValue()
     }
 
     private func postKey(_ ch: Character) {
