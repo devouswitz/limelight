@@ -2,7 +2,7 @@ import Foundation
 
 /// Something launchable that isn't a plain file: an app, a System Settings pane, or a Limelight command.
 public struct CatalogItem: Sendable, Hashable {
-    public enum Kind: String, Sendable, Codable { case app, setting, command }
+    public enum Kind: String, Sendable, Codable { case app, setting, command, action }
 
     public let kind: Kind
     public let name: String
@@ -10,6 +10,12 @@ public struct CatalogItem: Sendable, Hashable {
     public let path: String?
     public let url: URL?
     public let keywords: [String]
+    /// For actions: what runs it, e.g. "Shortcut".
+    public var subtitle: String?
+    /// When the app last ran, from files apps rewrite on every launch. Nil when unknown.
+    public var lastUsed: Date?
+    /// When the bundle was installed, updated or built.
+    public var updated: Date?
     let foldedName: [UInt8]
     let originalName: [UInt8]
     let foldedKeywords: [[UInt8]]
@@ -43,7 +49,6 @@ public enum AppCatalog {
     public static func scanApplications(folders: [String] = applicationFolders()) -> [CatalogItem] {
         let fm = FileManager.default
         var seenPaths = Set<String>()
-        var seenBundles = Set<String>()
         var items: [CatalogItem] = []
 
         func visit(_ dir: String, depth: Int) {
@@ -55,7 +60,6 @@ public enum AppCatalog {
                     guard seenPaths.insert(resolved).inserted else { continue }
                     let info = NSDictionary(contentsOfFile: path + "/Contents/Info.plist")
                     let bundleID = info?["CFBundleIdentifier"] as? String
-                    if let bundleID, !seenBundles.insert(bundleID).inserted { continue }
                     var display = fm.displayName(atPath: path)
                     if display.hasSuffix(".app") { display.removeLast(4) }
                     var keywords = aliases[bundleID ?? ""] ?? []
@@ -64,7 +68,10 @@ public enum AppCatalog {
                     if let bundleName = info?["CFBundleName"] as? String, bundleName != display, bundleName != stem {
                         keywords.append(bundleName)
                     }
-                    items.append(CatalogItem(kind: .app, name: display, key: path, path: path, keywords: keywords))
+                    var item = CatalogItem(kind: .app, name: display, key: path, path: path, keywords: keywords)
+                    item.lastUsed = bundleID.flatMap(lastUsed)
+                    item.updated = modificationDate(path)
+                    items.append(item)
                     continue
                 }
                 var isDir: ObjCBool = false
@@ -82,6 +89,23 @@ public enum AppCatalog {
                                      path: "/System/Library/CoreServices/Finder.app", keywords: ["files", "explorer"]))
         }
         return items
+    }
+
+    /// Apps rewrite their preferences and saved window state when they run, so the newest of those
+    /// files is a good "last opened" date that doesn't depend on Spotlight's metadata store.
+    public static func lastUsed(bundleID: String) -> Date? {
+        let lib = NSHomeDirectory() + "/Library"
+        return [
+            "\(lib)/Preferences/\(bundleID).plist",
+            "\(lib)/Containers/\(bundleID)/Data/Library/Preferences/\(bundleID).plist",
+            "\(lib)/Saved Application State/\(bundleID).savedState",
+        ].compactMap(modificationDate).max()
+    }
+
+    static func modificationDate(_ path: String) -> Date? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec))
     }
 
     /// Names people type for apps whose real name they don't remember.

@@ -1,29 +1,5 @@
 import Foundation
 
-public struct SearchResult: Sendable, Hashable, Identifiable {
-    public enum Kind: String, Sendable, Codable { case app, setting, command, folder, file, calculation, web, url }
-
-    public let id: String
-    public let kind: Kind
-    public let title: String
-    public let subtitle: String
-    public let path: String?
-    public let url: URL?
-    public let copyText: String?
-    public var score: Int
-
-    public init(id: String, kind: Kind, title: String, subtitle: String, path: String? = nil, url: URL? = nil, copyText: String? = nil, score: Int) {
-        self.id = id
-        self.kind = kind
-        self.title = title
-        self.subtitle = subtitle
-        self.path = path
-        self.url = url
-        self.copyText = copyText
-        self.score = score
-    }
-}
-
 public struct WebSearchProvider: Sendable, Hashable, Codable {
     public let name: String
     public let template: String
@@ -53,6 +29,8 @@ public final class SearchEngine: @unchecked Sendable {
     private var _catalog: [CatalogItem] = []
     private var catalogPaths = Set<String>()
     private var _web = WebSearchProvider.all[0]
+    private var _runningAppPaths = Set<String>()
+    public let clipboard = ClipboardHistory()
 
     public init(files: FileIndex, frecency: Frecency, home: String = NSHomeDirectory()) {
         self.files = files
@@ -70,13 +48,34 @@ public final class SearchEngine: @unchecked Sendable {
         }
     }
 
+    /// Paths of apps currently running; set by the app before each search session.
+    public var runningAppPaths: Set<String> {
+        get { lock.withLock { _runningAppPaths } }
+        set { lock.withLock { _runningAppPaths = newValue } }
+    }
+
     public var webSearch: WebSearchProvider {
         get { lock.withLock { _web } }
         set { lock.withLock { _web = newValue } }
     }
 
-    public func search(_ raw: String, limit: Int = 40) -> [SearchResult] {
+    /// Results ranked best first. `grouped` lays them out in sections for display.
+    public func search(_ raw: String, mode: SearchMode = .all, limit: Int = 40) -> [SearchResult] {
         let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch mode {
+        case .clipboard:
+            return clipboard.search(query)
+        case .applications:
+            return query.isEmpty ? allApps() : catalogResults(query, kinds: [.app])
+        case .actions:
+            return query.isEmpty ? allActions() : catalogResults(query, kinds: [.action, .command])
+        case .files:
+            if query.hasPrefix("/") || query.hasPrefix("~") { return browse(query, limit: 200) }
+            if query.isEmpty { return recentFiles(limit: 60) }
+            return ranked(fileResults(query, limit: 150), limit: 150)
+        case .all:
+            break
+        }
         if query.isEmpty { return recents(limit: 8) }
         if query.hasPrefix("/") || query.hasPrefix("~") { return browse(query, limit: limit) }
 
@@ -94,58 +93,18 @@ public final class SearchEngine: @unchecked Sendable {
             ))
         }
 
-        let folded = Fold.string(query)
-        let whole = Fold.bytes(query)
-        let tokens = Fold.tokens(query)
-        let (items, appPaths) = lock.withLock { (_catalog, catalogPaths) }
-
-        var catalogHits: [(item: CatalogItem, raw: Int)] = []
-        for item in items {
-            var s = Matcher.score(whole, in: item.foldedName, original: item.originalName, fuzzy: true)
-            if s == 0, tokens.count > 1 {
-                let parts = tokens.map { Matcher.score($0, in: item.foldedName, original: item.originalName) }
-                if !parts.contains(0) { s = parts.reduce(0, +) / parts.count - 30 }
-            }
-            for keyword in item.foldedKeywords {
-                let k = Matcher.score(whole, in: keyword)
-                if k >= Matcher.wordPrefix { s = max(s, k * 85 / 100) }
-            }
-            if whole.count == 1 && s < Matcher.wordPrefix { continue }
-            if item.kind == .command && s < Matcher.prefix { continue }
-            if s > 0 { catalogHits.append((item, s)) }
-        }
-        // Typo and fuzzy matches are a fallback; once something matches properly they are just noise.
-        let hasRealMatch = catalogHits.contains { $0.raw >= Matcher.substring }
-        for (item, raw) in catalogHits where !hasRealMatch || raw >= Matcher.substring {
-            var s = raw
-            switch item.kind {
-            case .app: s += 250
-            case .setting: s += 120
-            case .command: break
-            }
-            s += frecency.boost(for: item.key, foldedQuery: folded)
-            results.append(result(for: item, score: s))
-        }
-
-        if whole.count >= 2 {
+        results += catalogResults(query, kinds: [.app, .setting, .command, .action])
+        if Fold.bytes(query).count >= 2 {
             let hasAnswer = results.contains { $0.kind == .calculation }
-            for hit in files.search(tokens, limit: 60) {
-                if hit.isPackage, appPaths.contains(hit.path) { continue }
-                if hasAnswer && hit.score < 700 { continue }
-                let kind: SearchResult.Kind = hit.isDirectory ? .folder : .file
-                let id = hit.path
-                results.append(SearchResult(
-                    id: id, kind: kind, title: hit.name, subtitle: abbreviate((hit.path as NSString).deletingLastPathComponent),
-                    path: hit.path, score: hit.score + frecency.boost(for: id, foldedQuery: folded)
-                ))
-            }
+            results += fileResults(query, limit: 60).filter { !hasAnswer || $0.score >= 700 }
         }
-
-        var seen = Set<String>()
-        results = results
-            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.title.count < $1.title.count }
-            .filter { seen.insert($0.id).inserted }
-        results = Array(results.prefix(limit))
+        if let text = Definitions.lookup(query) {
+            results.append(SearchResult(
+                id: "define:" + query.lowercased(), kind: .definition, title: query, subtitle: Definitions.summary(text),
+                copyText: text, detail: Definitions.formatted(text), score: 300
+            ))
+        }
+        results = ranked(results, limit: limit)
 
         let web = webSearch
         if let url = web.url(for: query) {
@@ -157,15 +116,111 @@ public final class SearchEngine: @unchecked Sendable {
         return results
     }
 
+    public func grouped(_ results: [SearchResult], mode: SearchMode, query: String) -> [ResultGroup] {
+        Grouping.group(results, mode: mode, query: query)
+    }
+
+    /// Best score first; equal scores go to the more recently used or changed item, then the shorter name.
+    func ranked(_ results: [SearchResult], limit: Int) -> [SearchResult] {
+        var seen = Set<String>()
+        return Array(results.sorted { a, b in
+            if a.score != b.score { return a.score > b.score }
+            let da = a.date ?? .distantPast, db = b.date ?? .distantPast
+            if da != db { return da > db }
+            return a.title.count < b.title.count
+        }
+        .filter { seen.insert($0.id).inserted }
+        .prefix(limit))
+    }
+
+    func catalogResults(_ query: String, kinds: Set<CatalogItem.Kind>) -> [SearchResult] {
+        let folded = Fold.string(query)
+        let whole = Fold.bytes(query)
+        let tokens = Fold.tokens(query)
+        let (items, running) = lock.withLock { (_catalog, _runningAppPaths) }
+        let now = Date()
+
+        var hits: [(item: CatalogItem, raw: Int)] = []
+        for item in items where kinds.contains(item.kind) {
+            var s = Matcher.score(whole, in: item.foldedName, original: item.originalName, fuzzy: true)
+            if s == 0, tokens.count > 1 {
+                let parts = tokens.map { Matcher.score($0, in: item.foldedName, original: item.originalName) }
+                if !parts.contains(0) { s = parts.reduce(0, +) / parts.count - 30 }
+            }
+            for keyword in item.foldedKeywords {
+                let k = Matcher.score(whole, in: keyword)
+                if k >= Matcher.wordPrefix { s = max(s, k * 85 / 100) }
+            }
+            if whole.count == 1 && s < Matcher.wordPrefix { continue }
+            // Commands only answer to a deliberate prefix, so they don't crowd ordinary searches.
+            if kinds.count > 2 && (item.kind == .command || item.kind == .action) && (s < Matcher.wordPrefix || whole.count < 2) { continue }
+            if s > 0 { hits.append((item, s)) }
+        }
+        // Typo and fuzzy matches are a fallback; once something matches properly they are just noise.
+        let hasRealMatch = hits.contains { $0.raw >= Matcher.substring }
+        return hits.filter { !hasRealMatch || $0.raw >= Matcher.substring }.map { item, raw in
+            var s = raw
+            switch item.kind {
+            case .app:
+                // Apps you use, apps just built or updated, and apps already running come first among equals.
+                s += 250
+                s += Recency.bonus(item.lastUsed, now: now, max: 60, horizonDays: 90)
+                s += Recency.bonus(item.updated, now: now, max: 25, horizonDays: 60)
+                if let p = item.path, running.contains(p) { s += 30 }
+            case .setting: s += 120
+            case .action: s += 60
+            case .command: break
+            }
+            s += frecency.boost(for: item.key, foldedQuery: folded)
+            return result(for: item, score: s)
+        }
+    }
+
+    func fileResults(_ query: String, limit: Int) -> [SearchResult] {
+        let folded = Fold.string(query)
+        let appPaths = lock.withLock { catalogPaths }
+        return files.search(Fold.tokens(query), limit: limit).compactMap { hit in
+            if hit.isPackage, appPaths.contains(hit.path) { return nil }
+            return SearchResult(
+                id: hit.path, kind: hit.isDirectory ? .folder : .file, title: hit.name,
+                subtitle: abbreviate((hit.path as NSString).deletingLastPathComponent), path: hit.path,
+                date: hit.modified, score: hit.score + frecency.boost(for: hit.path, foldedQuery: folded)
+            )
+        }
+    }
+
+    func allApps() -> [SearchResult] {
+        lock.withLock { _catalog }.filter { $0.kind == .app }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { result(for: $0, score: 0) }
+    }
+
+    func allActions() -> [SearchResult] {
+        lock.withLock { _catalog }.filter { $0.kind == .action || $0.kind == .command }
+            .map { result(for: $0, score: 0) }
+    }
+
+    func recentFiles(limit: Int) -> [SearchResult] {
+        files.recent(limit: limit).map { hit in
+            SearchResult(
+                id: hit.path, kind: hit.isDirectory ? .folder : .file, title: hit.name,
+                subtitle: abbreviate((hit.path as NSString).deletingLastPathComponent), path: hit.path,
+                date: hit.modified, score: 0
+            )
+        }
+    }
+
     func result(for item: CatalogItem, score: Int) -> SearchResult {
         let subtitle: String
         switch item.kind {
         case .app: subtitle = abbreviate(item.path ?? "")
         case .setting: subtitle = "System Settings"
         case .command: subtitle = "Limelight"
+        case .action: subtitle = item.subtitle ?? "Action"
         }
         return SearchResult(id: item.key, kind: SearchResult.Kind(rawValue: item.kind.rawValue)!, title: item.name,
-                            subtitle: subtitle, path: item.path, url: item.url, score: score)
+                            subtitle: subtitle, path: item.path, url: item.url,
+                            date: [item.lastUsed, item.updated].compactMap { $0 }.max(), score: score)
     }
 
     /// What you opened most, shown before you type anything.

@@ -128,3 +128,83 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(engine.search("/Syst").first?.title, "System")
     }
 }
+
+final class LayoutAndSignalTests: XCTestCase {
+    func engine(_ items: [CatalogItem]) -> SearchEngine {
+        let index = FileIndex(config: IndexConfig(roots: [], excludedPaths: [], excludedNames: [], includeHidden: false))
+        let e = SearchEngine(files: index, frecency: Frecency(file: nil))
+        e.catalog = items
+        return e
+    }
+
+    func app(_ name: String, updated: Date? = nil, used: Date? = nil) -> CatalogItem {
+        var item = CatalogItem(kind: .app, name: name, key: "/A/\(name).app", path: "/A/\(name).app")
+        item.updated = updated
+        item.lastUsed = used
+        return item
+    }
+
+    func testEqualMatchesGoNewestFirst() {
+        let now = Date()
+        let e = engine([
+            app("Game 7.2 Beta 6", updated: now.addingTimeInterval(-7 * 86_400)),
+            app("Game 7.3 Beta 9", updated: now.addingTimeInterval(-86_400)),
+            app("Game 7.3 Beta 10", updated: now.addingTimeInterval(-3600)),
+        ])
+        XCTAssertEqual(e.search("game").prefix(3).map(\.title), ["Game 7.3 Beta 10", "Game 7.3 Beta 9", "Game 7.2 Beta 6"])
+    }
+
+    func testRecentUseBeatsInstallDate() {
+        let now = Date()
+        let e = engine([app("Clock", updated: now), app("Claude", used: now.addingTimeInterval(-600))])
+        XCTAssertEqual(e.search("cl").first?.title, "Claude")
+    }
+
+    func testGroupingPutsTopHitFirstAndWebLast() {
+        let e = engine([app("Safari"), app("Safari Technology Preview")])
+        let groups = e.grouped(e.search("saf"), mode: .all, query: "saf")
+        XCTAssertEqual(groups.first?.section, .topHit)
+        XCTAssertEqual(groups.first?.results.map(\.title), ["Safari"])
+        XCTAssertEqual(groups.last?.section, .web)
+        XCTAssertEqual(groups.map(\.section), [.topHit, .applications, .web])
+    }
+
+    func testModes() {
+        var lock = CatalogItem(kind: .action, name: "Lock Screen", key: "action:lock", url: URL(string: "limelight:action/lock"))
+        lock.subtitle = "Action"
+        let e = engine([app("Safari"), lock])
+        XCTAssertEqual(e.search("", mode: .applications).map(\.title), ["Safari"])
+        XCTAssertEqual(e.search("lo", mode: .actions).map(\.title), ["Lock Screen"])
+        XCTAssertEqual(e.search("lock").first?.title, "Lock Screen")
+        XCTAssertFalse(e.search("l").contains { $0.kind == .action }, "actions need a deliberate prefix in the mixed view")
+        e.clipboard.add("meeting moved to 3pm", source: "Messages")
+        e.clipboard.add("https://example.com", source: nil)
+        XCTAssertEqual(e.search("", mode: .clipboard).map(\.title), ["https://example.com", "meeting moved to 3pm"])
+        XCTAssertEqual(e.search("3pm", mode: .clipboard).count, 1)
+        e.clipboard.add("meeting moved to 3pm", source: "Messages")
+        XCTAssertEqual(e.search("", mode: .clipboard).first?.title, "meeting moved to 3pm", "copying again moves it to the top")
+    }
+
+    func testClipboardExpires() {
+        let h = ClipboardHistory()
+        h.add("old", source: nil, date: Date().addingTimeInterval(-9 * 3600))
+        h.add("new", source: nil)
+        XCTAssertEqual(h.search("").map(\.title), ["new"])
+    }
+
+    func testRecencyIsSmoothAndBounded() {
+        let now = Date()
+        let today = Recency.bonus(now, now: now, max: 60, horizonDays: 90)
+        let week = Recency.bonus(now.addingTimeInterval(-7 * 86_400), now: now, max: 60, horizonDays: 90)
+        let old = Recency.bonus(now.addingTimeInterval(-200 * 86_400), now: now, max: 60, horizonDays: 90)
+        XCTAssertEqual(today, 60)
+        XCTAssertTrue(week > 0 && week < today)
+        XCTAssertEqual(old, 0)
+    }
+
+    func testDefinitions() throws {
+        let text = try XCTUnwrap(Definitions.lookup("serendipity"))
+        XCTAssertTrue(Definitions.summary(text).hasPrefix("noun"))
+        XCTAssertNil(Definitions.lookup("12*3"))
+    }
+}

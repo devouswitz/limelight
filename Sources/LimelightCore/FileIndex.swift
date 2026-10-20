@@ -422,6 +422,24 @@ public final class FileIndex: @unchecked Sendable {
         }
     }
 
+    /// The most recently modified files, outside build and cache folders.
+    public func recent(limit: Int) -> [Hit] {
+        let nodes = snapshot()
+        var top = TopK(limit: limit)
+        for (ni, node) in nodes.enumerated() where !node.isNoisy {
+            for e in 0..<node.count where node.flags[e] & DirNode.isDirectory == 0 {
+                top.push(Candidate(score: Int(node.mtimes[e]), node: ni, entry: e))
+            }
+        }
+        return top.sorted().map { c in
+            let node = nodes[c.node]
+            let name = node.name(at: c.entry)
+            return Hit(path: node.path + "/" + name, name: name, isDirectory: false,
+                       isPackage: node.flags[c.entry] & DirNode.isPackage != 0, score: 0,
+                       modified: Date(timeIntervalSince1970: TimeInterval(node.mtimes[c.entry])))
+        }
+    }
+
     private static func scan(_ node: DirNode, nodeIndex: Int, tokens: [[UInt8]], pathHits: [Bool], shortQuery: Bool, now: Int, into top: inout TopK) {
         node.folded.withUnsafeBufferPointer { folded in
             node.names.withUnsafeBufferPointer { names in
@@ -454,8 +472,9 @@ public final class FileIndex: @unchecked Sendable {
 
                     let flags = node.flags[e]
                     if flags & DirNode.isDirectory != 0 { total += 15 }
-                    let age = now - Int(node.mtimes[e])
-                    if age < 86_400 { total += 60 } else if age < 604_800 { total += 40 } else if age < 2_592_000 { total += 25 } else if age < 31_536_000 { total += 10 }
+                    // Smooth: 70 for today, about 40 for last week, 0 after six months.
+                    let days = Double(max(0, now - Int(node.mtimes[e]))) / 86_400
+                    total += max(0, Int(70 * (1 - log2(1 + days) / log2(181.0))))
                     total -= min(node.depth, 10) * 5
                     if node.isNoisy { total -= 200 }
                     top.push(Candidate(score: total, node: nodeIndex, entry: e))

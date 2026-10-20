@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Limelight’s Toggle Dark Mode action asks System Events to switch the appearance.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Limelight indexes file names on your Desktop so you can find them by typing.</string>
 	<key>NSDocumentsFolderUsageDescription</key>

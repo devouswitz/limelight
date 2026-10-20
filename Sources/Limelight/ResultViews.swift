@@ -5,20 +5,34 @@ import UniformTypeIdentifiers
 enum Icons {
     private static let cache = NSCache<NSString, NSImage>()
 
-    static func image(for r: SearchResult) -> NSImage {
+    /// SF Symbols for built-in actions, keyed by result id.
+    static var symbols: [String: String] = [:]
+
+    static func image(for r: SearchResult, size: CGFloat = 32) -> NSImage {
+        if let symbol = symbols[r.id] {
+            let config = NSImage.SymbolConfiguration(pointSize: size * 0.6, weight: .medium)
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config) ?? NSImage()
+            return image
+        }
         let key: String
         switch r.kind {
         case .app, .file, .folder: key = r.path ?? ""
         case .setting: key = "/System/Applications/System Settings.app"
         case .calculation: key = "/System/Applications/Calculator.app"
+        case .definition: key = "/System/Applications/Dictionary.app"
         case .web, .url: key = browserPath ?? "/Applications/Safari.app"
+        case .action: key = r.id.hasPrefix("shortcut:") ? "/System/Applications/Shortcuts.app" : ""
+        case .clipboard:
+            let config = NSImage.SymbolConfiguration(pointSize: size * 0.55, weight: .regular)
+            return NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)?.withSymbolConfiguration(config) ?? NSImage()
         case .command: return NSApp.applicationIconImage
         }
-        if let hit = cache.object(forKey: key as NSString) { return hit }
+        let cacheKey = "\(key)#\(Int(size))" as NSString
+        if let hit = cache.object(forKey: cacheKey) { return hit }
         // Resolve symlinks (Safari lives in a cryptex, linked into /Applications) so icons carry no alias badge.
         let image = NSWorkspace.shared.icon(forFile: (key as NSString).resolvingSymlinksInPath)
-        image.size = NSSize(width: 32, height: 32)
-        cache.setObject(image, forKey: key as NSString)
+        image.size = NSSize(width: size, height: size)
+        cache.setObject(image, forKey: cacheKey)
         return image
     }
 
@@ -31,9 +45,12 @@ enum Icons {
         switch r.kind {
         case .app: return "Application"
         case .setting: return "System Settings"
-        case .command: return "Command"
+        case .command: return "Limelight"
+        case .action: return r.subtitle
         case .folder: return "Folder"
         case .calculation: return "Calculator"
+        case .definition: return "Dictionary"
+        case .clipboard: return "Clipboard"
         case .web: return "Web Search"
         case .url: return "Website"
         case .file:
@@ -44,13 +61,25 @@ enum Icons {
             return "Document"
         }
     }
+
+    /// The dim text after a row's name: the containing folder for files, the time for clipboard entries.
+    static func hint(for r: SearchResult) -> String? {
+        switch r.kind {
+        case .file, .folder:
+            guard let path = r.path else { return nil }
+            let parent = (path as NSString).deletingLastPathComponent
+            return parent == NSHomeDirectory() ? "Home" : (parent as NSString).lastPathComponent
+        case .clipboard: return r.subtitle
+        case .calculation: return r.subtitle
+        default: return nil
+        }
+    }
 }
 
 final class ResultRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 8, dy: 1)
         NSColor.controlAccentColor.setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 7, yRadius: 7).fill()
     }
 
     override var isEmphasized: Bool {
@@ -59,47 +88,62 @@ final class ResultRowView: NSTableRowView {
     }
 }
 
+final class SectionHeaderCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("SectionHeader")
+    private let label = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        identifier = Self.identifier
+        label.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(_ title: String) { label.stringValue = title }
+}
+
 final class ResultCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ResultCell")
 
     private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
-    private let subtitle = NSTextField(labelWithString: "")
-    private let accessory = NSTextField(labelWithString: "")
+    private let flashLabel = NSTextField(labelWithString: "")
     private var result: SearchResult?
     private var query = ""
-    private var flash: String?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         identifier = Self.identifier
         icon.imageScaling = .scaleProportionallyUpOrDown
-        for label in [title, subtitle, accessory] {
-            label.lineBreakMode = .byTruncatingTail
-            label.cell?.truncatesLastVisibleLine = true
-            label.translatesAutoresizingMaskIntoConstraints = false
-        }
-        subtitle.lineBreakMode = .byTruncatingMiddle
-        accessory.alignment = .right
-        accessory.setContentCompressionResistancePriority(.required, for: .horizontal)
-        accessory.setContentHuggingPriority(.required, for: .horizontal)
+        title.lineBreakMode = .byTruncatingTail
+        title.maximumNumberOfLines = 1
+        title.usesSingleLineMode = true
+        title.cell?.wraps = false
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        for v in [icon, title, subtitle, accessory] as [NSView] { addSubview(v) }
+        flashLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        flashLabel.isHidden = true
+        for v in [icon, title, flashLabel] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 30),
-            icon.heightAnchor.constraint(equalToConstant: 30),
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor, constant: -12),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 0),
-            subtitle.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor, constant: -12),
-            accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            icon.heightAnchor.constraint(equalToConstant: 20),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: flashLabel.leadingAnchor, constant: -6),
+            flashLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            flashLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -112,18 +156,18 @@ final class ResultCell: NSTableCellView {
     func configure(_ r: SearchResult, query: String) {
         result = r
         self.query = query
-        flash = nil
-        icon.image = Icons.image(for: r)
+        flashLabel.isHidden = true
+        icon.image = Icons.image(for: r, size: 20)
+        icon.contentTintColor = nil
         render()
     }
 
     func showFlash(_ text: String) {
-        flash = text
+        flashLabel.stringValue = text
+        flashLabel.isHidden = false
         render()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self, self.flash == text else { return }
-            self.flash = nil
-            self.render()
+            self?.flashLabel.isHidden = true
         }
     }
 
@@ -131,25 +175,22 @@ final class ResultCell: NSTableCellView {
         guard let r = result else { return }
         let selected = backgroundStyle == .emphasized
         let primary: NSColor = selected ? .white : .labelColor
-        let secondary: NSColor = selected ? NSColor.white.withAlphaComponent(0.78) : .secondaryLabelColor
-        let tertiary: NSColor = selected ? NSColor.white.withAlphaComponent(0.85) : .tertiaryLabelColor
+        let dim: NSColor = selected ? NSColor.white.withAlphaComponent(0.75) : .tertiaryLabelColor
+        icon.contentTintColor = selected ? .white : .secondaryLabelColor
+        flashLabel.textColor = dim
 
-        let titleSize: CGFloat = r.kind == .calculation ? 17 : 14
-        let text = NSMutableAttributedString(string: r.title, attributes: [
-            .font: NSFont.systemFont(ofSize: titleSize, weight: r.kind == .calculation ? .semibold : .regular),
-            .foregroundColor: primary,
-        ])
-        if r.kind != .calculation && r.kind != .web && r.kind != .url {
+        let font = NSFont.systemFont(ofSize: 13.5)
+        let oneLine = NSMutableParagraphStyle()
+        oneLine.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString(string: r.title, attributes: [.font: font, .foregroundColor: primary, .paragraphStyle: oneLine])
+        if [.app, .file, .folder, .setting, .action, .command].contains(r.kind) {
             for range in Matcher.highlights(for: query, in: r.title) {
-                text.addAttribute(.font, value: NSFont.systemFont(ofSize: titleSize, weight: .bold), range: NSRange(range, in: r.title))
+                text.addAttribute(.font, value: NSFont.systemFont(ofSize: 13.5, weight: .semibold), range: NSRange(range, in: r.title))
             }
         }
+        if let hint = Icons.hint(for: r), !hint.isEmpty {
+            text.append(NSAttributedString(string: "  —  " + hint, attributes: [.font: NSFont.systemFont(ofSize: 12.5), .foregroundColor: dim, .paragraphStyle: oneLine]))
+        }
         title.attributedStringValue = text
-        subtitle.attributedStringValue = NSAttributedString(string: r.subtitle, attributes: [
-            .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: secondary,
-        ])
-        accessory.attributedStringValue = NSAttributedString(string: flash ?? Icons.kindLabel(for: r), attributes: [
-            .font: NSFont.systemFont(ofSize: 11.5, weight: flash == nil ? .regular : .semibold), .foregroundColor: tertiary,
-        ])
     }
 }

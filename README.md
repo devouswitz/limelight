@@ -37,15 +37,41 @@ Settings shows a warning while Spotlight still owns the combination.
 | Key | Action |
 | --- | --- |
 | ↑ ↓, ⌃P ⌃N | Move selection |
-| Return | Open (calculator: copy the answer) |
-| ⌘Return | Show in Finder |
-| ⌘1 – ⌘9 | Open that row |
+| ⌘↑ ⌘↓ | Previous / next section |
+| Return | Open (calculator, definition, clipboard: copy) |
+| ⌘Return, ⌘R | Show in Finder |
+| ⌘Y | Quick Look |
 | ⌘C | Copy the path, or the answer |
-| Tab | Complete; on a folder, browse into it |
-| Esc | Clear the query, then close |
+| ⌘B | Search the web for the query |
+| ⌘1 ⌘2 ⌘3 ⌘4 | Applications, Files, Actions, Clipboard (again to go back) |
+| Tab, → | Accept the completion; on a folder, browse into it |
+| Esc | Clear the query, leave the mode, then close |
 | ⌘, | Settings |
 
-You can also drag a result into another app.
+Double-click opens a result, and you can drag results into other apps. To move the panel, drag any empty part of it, such as the search icon, the margins or the preview. It stays where you leave it, on every display. **Reset Panel Position** in the menu bar puts it back.
+
+## The panel
+
+Results are grouped like Spotlight's: a Top Hit, then Applications, System Settings, Actions, Folders and Documents, ordered by their best match, with web search last. The right side previews the selection: a Quick Look preview for documents, and version and last-opened date for apps. Calculations, definitions and clipboard entries are shown in full. Gray text after the cursor finishes the top hit's name.
+
+- **Applications (⌘1):** every app, alphabetically, filtered as you type.
+- **Files (⌘2):** files only, with recently modified files shown before you type.
+- **Actions (⌘3):** Lock Screen, Sleep, Turn Off Display, Screen Saver, Toggle Dark Mode, Show Trash, Restart, Shut Down and Log Out, plus every shortcut in the Shortcuts app.
+- **Clipboard (⌘4):** text and files you copied in the last 8 hours. It is held in memory only and skips anything a password manager marks as concealed. You can turn it off in Settings.
+
+Typing a word also looks it up in the Dictionary app's local dictionaries.
+
+## How ranking works
+
+Each result gets a score:
+
+1. **How well the name matches.** From best to worst: exact name, exact name without its extension, prefix ("saf" → Safari), start of a word ("code" → Visual Studio Code), word initials ("vsc"), anywhere in the name, and, for apps only, one typo ("chorme") or scattered letters. Within each tier, a match covering more of the name scores higher. Multi-word queries can match folder names too, so "lifting models" finds `Models.swift` inside a `Lifting` folder.
+2. **What kind of thing it is.** Apps get the largest boost, then System Settings panes, then actions, so an app beats a file with the same name.
+3. **How recent it is.** Apps gain points for being opened recently and, by less, for being installed, updated or built recently. Open apps get a little extra. Files gain points for recent changes. These bonuses shrink smoothly with age, so two equal matches always list the newer one first.
+4. **What you've picked before.** Opening a result after typing something boosts it for that query and its prefixes, plus a smaller general bonus for things you open often. All of it halves every two weeks.
+5. **Penalties.** Files deep in the folder tree, or inside build, cache or vendor folders, rank lower.
+
+An app's last-opened date comes from the preferences and saved-window files every app rewrites when it runs, so Limelight knows about apps you launch from the Dock too.
 
 ## Settings
 
@@ -55,7 +81,6 @@ Shortcut, open at login, web search engine, which folders are searched, which ar
 
 - **No file contents:** it searches names and folder paths, not text inside documents.
 - **No currency conversion:** that needs a network rate source.
-- **No Quick Look preview.**
 
 ## Layout
 

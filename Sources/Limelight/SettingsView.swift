@@ -14,12 +14,15 @@ final class SettingsModel: ObservableObject {
     @Published var config = IndexConfig.standard()
     @Published var itemCount = 0
     @Published var indexing = false
+    @Published var clipboardHistory = true
 
     var setHotKey: (KeyCombo) -> Void = { _ in }
     var pauseHotKey: (Bool) -> Void = { _ in }
     var setWebSearch: (String) -> Void = { _ in }
     var setConfig: (IndexConfig) -> Void = { _ in }
     var rebuild: () -> Void = {}
+    var setClipboardHistory: (Bool) -> Void = { _ in }
+    var resetPosition: () -> Void = {}
 
     func refreshSystemState() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -77,6 +80,16 @@ struct SettingsView: View {
 
             Section("General") {
                 Toggle("Open at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.toggleLaunchAtLogin($0) }))
+                Toggle("Clipboard history", isOn: Binding(
+                    get: { model.clipboardHistory },
+                    set: { model.clipboardHistory = $0; model.setClipboardHistory($0) }
+                ))
+                .help("Keeps text you copy for 8 hours, in memory only. Press ⌘4 in the search panel to browse it.")
+                HStack {
+                    Text("Panel position")
+                    Spacer()
+                    Button("Reset") { model.resetPosition() }
+                }
                 Picker("Web search", selection: Binding(get: { model.webSearch }, set: { model.webSearch = $0; model.setWebSearch($0) })) {
                     ForEach(WebSearchProvider.all, id: \.name) { Text($0.name).tag($0.name) }
                 }

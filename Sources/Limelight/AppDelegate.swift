@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         search.actions = self
         HotKeyCenter.shared.onPress = { [weak self] in self?.search.toggle() }
 
+        for (item, symbol) in Self.systemActions { Icons.symbols[item.key] = symbol }
+        setClipboardHistory(prefs.clipboardHistory)
         reloadCatalog()
         index.rebuild()
         startWatchers()
@@ -42,6 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         wireSettings()
 
         let env = ProcessInfo.processInfo.environment
+        if let drag = env["LIMELIGHT_DRAG"] {
+            let parts = drag.split(separator: ",").compactMap { Double($0) }
+            search.testDrag(by: CGPoint(x: parts.first ?? 0, y: parts.last ?? 0)) { NSApp.terminate(nil) }
+            return
+        }
         if let path = env["LIMELIGHT_SNAPSHOT"] {
             snapshotWhenIndexed(query: env["LIMELIGHT_QUERY"] ?? "", path: path)
             return
@@ -69,7 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
             return
         }
         let typeKeys = ProcessInfo.processInfo.environment["LIMELIGHT_TYPE"] != nil
-        search.snapshot(query: query, typeKeys: typeKeys, to: path) { NSApp.terminate(nil) }
+        let mode = SearchMode(rawValue: Int(ProcessInfo.processInfo.environment["LIMELIGHT_MODE"] ?? "") ?? 0) ?? .all
+        search.snapshot(query: query, mode: mode, typeKeys: typeKeys, to: path) { NSApp.terminate(nil) }
     }
 
     // MARK: - Catalog and index
@@ -77,7 +85,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     private func reloadCatalog() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let items = AppCatalog.scanApplications() + AppCatalog.settingsPanes() + Self.commands
+                + Self.systemActions.map(\.item) + Self.loadShortcuts()
             DispatchQueue.main.async { self?.engine.catalog = items }
+        }
+    }
+
+    /// Built-in actions. Restart, Shut Down and Log Out go through loginwindow, which asks for confirmation.
+    private static let systemActions: [(item: CatalogItem, symbol: String)] = [
+        ("Lock Screen", "lock", "lock.fill", ["lock"]),
+        ("Sleep", "sleep", "moon.fill", ["sleep"]),
+        ("Turn Off Display", "displaysleep", "display", ["screen off", "display sleep"]),
+        ("Start Screen Saver", "screensaver", "sparkles.tv", ["screensaver"]),
+        ("Toggle Dark Mode", "darkmode", "circle.lefthalf.filled", ["dark mode", "light mode", "appearance"]),
+        ("Show Trash", "trash", "trash", ["bin", "recycle"]),
+        ("Restart…", "restart", "restart", ["reboot"]),
+        ("Shut Down…", "shutdown", "power", ["power off", "turn off"]),
+        ("Log Out…", "logout", "rectangle.portrait.and.arrow.right", ["sign out"]),
+    ].map { name, id, symbol, keywords in
+        var item = CatalogItem(kind: .action, name: name, key: "action:" + id, url: URL(string: "limelight:action/" + id), keywords: keywords)
+        item.subtitle = "Action"
+        return (item, symbol)
+    }
+
+    /// The user's Shortcuts, read from the shortcuts command-line tool.
+    private static func loadShortcuts() -> [CatalogItem] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+        process.arguments = ["list"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { line in
+            let name = String(line).trimmingCharacters(in: .whitespaces)
+            var c = URLComponents()
+            c.scheme = "limelight"
+            c.path = "shortcut"
+            c.queryItems = [URLQueryItem(name: "name", value: name)]
+            guard !name.isEmpty, let url = c.url else { return nil }
+            var item = CatalogItem(kind: .action, name: name, key: "shortcut:" + name, url: url)
+            item.subtitle = "Shortcut"
+            return item
         }
     }
 
@@ -159,6 +209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         let rebuild = NSMenuItem(title: "Rebuild Index", action: #selector(rebuildIndex), keyEquivalent: "")
         rebuild.target = self
         menu.addItem(rebuild)
+        let reset = NSMenuItem(title: "Reset Panel Position", action: #selector(resetPanelPosition), keyEquivalent: "")
+        reset.target = self
+        menu.addItem(reset)
         let prefsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         prefsItem.target = self
         menu.addItem(prefsItem)
@@ -183,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     @objc private func openSearch() { search.show() }
     @objc private func rebuildIndex() { index.rebuild(); syncSettings() }
     @objc private func openSettings() { showSettings() }
+    @objc private func resetPanelPosition() { search.resetPosition() }
 
     /// Standard Edit menu so ⌘C, ⌘V, ⌘A and undo work in text fields of an app with no menu bar.
     private func installMainMenu() {
@@ -235,6 +289,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
             self.syncSettings()
         }
         settings.rebuild = { [weak self] in self?.rebuildIndex() }
+        settings.clipboardHistory = prefs.clipboardHistory
+        settings.setClipboardHistory = { [weak self] on in
+            self?.prefs.clipboardHistory = on
+            self?.setClipboardHistory(on)
+        }
+        settings.resetPosition = { [weak self] in self?.search.resetPosition() }
         syncSettings()
     }
 
@@ -263,7 +323,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         case "limelight:settings": showSettings()
         case "limelight:reindex": rebuildIndex()
         case "limelight:quit": NSApp.terminate(nil)
-        default: break
+        case "limelight:action/lock": Self.lockScreen()
+        case "limelight:action/sleep": Self.run("/usr/bin/pmset", ["sleepnow"])
+        case "limelight:action/displaysleep": Self.run("/usr/bin/pmset", ["displaysleepnow"])
+        case "limelight:action/screensaver":
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app"))
+        case "limelight:action/darkmode":
+            Self.appleScript("tell application \"System Events\" to tell appearance preferences to set dark mode to not dark mode")
+        case "limelight:action/trash":
+            NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.Trash"))
+        case "limelight:action/restart": Self.appleScript("tell application \"loginwindow\" to «event aevtrrst»")
+        case "limelight:action/shutdown": Self.appleScript("tell application \"loginwindow\" to «event aevtrsdn»")
+        case "limelight:action/logout": Self.appleScript("tell application \"loginwindow\" to «event aevtlogo»")
+        default:
+            if url.path == "shortcut", let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "name" })?.value {
+                Self.run("/usr/bin/shortcuts", ["run", name])
+            }
+        }
+    }
+
+    private static func run(_ tool: String, _ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        try? p.run()
+    }
+
+    private static func appleScript(_ source: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&error)
+        }
+    }
+
+    /// The same call the Lock Screen menu item makes.
+    private static func lockScreen() {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW),
+              let sym = dlsym(handle, "SACLockScreenImmediate") else { return }
+        typealias Lock = @convention(c) () -> Int32
+        _ = unsafeBitCast(sym, to: Lock.self)()
+    }
+
+    // MARK: - Clipboard
+
+    private var clipboardTimer: Timer?
+    private var lastChangeCount = NSPasteboard.general.changeCount
+
+    /// Polls the pasteboard, which has no change notification. Skips anything a password manager
+    /// marks as concealed or transient.
+    func setClipboardHistory(_ on: Bool) {
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+        if !on { engine.clipboard.clear(); return }
+        let skip: Set<String> = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType", "org.nspasteboard.AutoGeneratedType"]
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let pb = NSPasteboard.general
+            guard pb.changeCount != self.lastChangeCount else { return }
+            self.lastChangeCount = pb.changeCount
+            let types = Set((pb.types ?? []).map(\.rawValue))
+            guard types.isDisjoint(with: skip) else { return }
+            let source = NSWorkspace.shared.frontmostApplication?.localizedName
+            if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+                self.engine.clipboard.add(urls.map(\.path).joined(separator: "\n"), source: source)
+            } else if let text = pb.string(forType: .string) {
+                self.engine.clipboard.add(text, source: source)
+            }
         }
     }
 }

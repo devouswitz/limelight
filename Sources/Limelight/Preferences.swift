@@ -23,6 +23,11 @@ final class Preferences {
         set { defaults.set(newValue.name, forKey: "webSearch") }
     }
 
+    var clipboardHistory: Bool {
+        get { defaults.object(forKey: "clipboardHistory") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "clipboardHistory") }
+    }
+
     var hasLaunchedBefore: Bool {
         get { defaults.bool(forKey: "hasLaunchedBefore") }
         set { defaults.set(newValue, forKey: "hasLaunchedBefore") }
