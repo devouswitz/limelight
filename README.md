@@ -1,5 +1,7 @@
 # Limelight
 
+> **PENDING:** Limelight is still being worked on and isn't ready for general use yet.
+
 A launcher and file finder for macOS, built to replace Spotlight.
 
 Spotlight's results come from `mds`, the metadata indexer. When that index stalls, gets corrupted, or skips a folder, apps and files go missing and nothing tells you why. Limelight keeps its own index of file names in memory and does not use `mds` for anything:
