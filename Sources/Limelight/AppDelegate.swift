@@ -1,6 +1,9 @@
 import AppKit
+import os
 import LimelightCore
 import SwiftUI
+
+private let log = Logger(subsystem: "com.spencermccauley.Limelight", category: "app")
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, LimelightActions {
     private let prefs = Preferences()
@@ -16,12 +19,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     private let settings = SettingsModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let env = ProcessInfo.processInfo.environment
+        // Developer runs (snapshots, the promo, the drag test) are short-lived second copies. They must not
+        // take the shortcut, add a menu bar icon, watch files or write history, or they disturb the real one.
+        let devRun = ["LIMELIGHT_PROMO", "LIMELIGHT_DRAG", "LIMELIGHT_SNAPSHOT"].contains { env[$0] != nil }
+        if !devRun, NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            log.notice("another copy is already running; exiting")
+            NSApp.terminate(nil)
+            return
+        }
         installMainMenu()
 
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Limelight", isDirectory: true)
         index = FileIndex(config: prefs.indexConfig)
-        engine = SearchEngine(files: index, frecency: Frecency(file: support.appendingPathComponent("history.json")))
+        engine = SearchEngine(files: index, frecency: Frecency(file: devRun ? nil : support.appendingPathComponent("history.json")))
         engine.webSearch = prefs.webSearch
         index.onChange = { [weak self] in
             DispatchQueue.main.async {
@@ -32,18 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
 
         search = SearchController(engine: engine)
         search.actions = self
-        HotKeyCenter.shared.onPress = { [weak self] in self?.search.toggle() }
-
         for (item, symbol) in Self.systemActions { Icons.symbols[item.key] = symbol }
-        setClipboardHistory(prefs.clipboardHistory)
         reloadCatalog()
         index.rebuild()
-        startWatchers()
-        installStatusItem()
-        installHotKey()
-        wireSettings()
 
-        let env = ProcessInfo.processInfo.environment
         if let promo = env["LIMELIGHT_PROMO"] {
             recordPromoWhenReady(to: URL(fileURLWithPath: promo))
             return
@@ -58,6 +63,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
             return
         }
 
+        HotKeyCenter.shared.onPress = { [weak self] in self?.search.toggle() }
+        setClipboardHistory(prefs.clipboardHistory)
+        startWatchers()
+        installStatusItem()
+        installHotKey()
+        wireSettings()
+
         if !prefs.hasLaunchedBefore {
             prefs.hasLaunchedBefore = true
             showSettings()
@@ -65,12 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        engine.frecency.save()
+        engine?.frecency.save()
     }
 
     /// Opening Limelight from Finder or the Dock while it is already running shows the search panel.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        search.show()
+        search?.show()
         return false
     }
 
@@ -187,10 +199,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
 
     // MARK: - Hotkey
 
+    private var hotKeyRetry: Timer?
+
+    /// Registers the saved shortcut. If something else briefly holds it, keeps trying every few seconds
+    /// instead of leaving Limelight without a shortcut until the next launch.
+    private func registerSavedHotKey() {
+        guard let combo = prefs.hotKey else { return }
+        let ok = HotKeyCenter.shared.register(combo)
+        settings.hotKeyWorks = ok
+        log.notice("shortcut \(combo.display, privacy: .public) registered: \(ok, privacy: .public)")
+        hotKeyRetry?.invalidate()
+        hotKeyRetry = nil
+        if !ok {
+            hotKeyRetry = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in self?.registerSavedHotKey() }
+        }
+    }
+
     private func installHotKey() {
         if let saved = prefs.hotKey {
             settings.hotKey = saved
-            settings.hotKeyWorks = HotKeyCenter.shared.register(saved)
+            registerSavedHotKey()
             updateOpenItem()
             return
         }
@@ -207,7 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     private func setHotKey(_ combo: KeyCombo) {
         prefs.hotKey = combo
         settings.hotKey = combo
-        settings.hotKeyWorks = HotKeyCenter.shared.register(combo)
+        registerSavedHotKey()
         settings.refreshSystemState()
         updateOpenItem()
     }
@@ -296,8 +324,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
             guard let self else { return }
             if recording {
                 HotKeyCenter.shared.unregister()
-            } else if let combo = self.prefs.hotKey {
-                self.settings.hotKeyWorks = HotKeyCenter.shared.register(combo)
+            } else {
+                self.registerSavedHotKey()
             }
         }
         settings.setWebSearch = { [weak self] name in
