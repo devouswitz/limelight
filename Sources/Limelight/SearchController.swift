@@ -122,6 +122,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     private let divider = NSBox()
     private let body = NSView()
     private var bodyHeight: NSLayoutConstraint!
+    private var contentRoot: NSView!
 
     private var rows: [Row] = []
     private var mode: SearchMode = .all
@@ -154,6 +155,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         let content = DragArea()
         content.translatesAutoresizingMaskIntoConstraints = false
         content.onDragEnd = { [weak self] in self?.savePosition() }
+        contentRoot = content
 
         modeIcon.symbolConfiguration = .init(pointSize: 19, weight: .medium)
         modeIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -449,24 +451,28 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             let groups = engine.grouped(found, mode: mode, query: query)
             DispatchQueue.main.async {
                 guard let self, token == self.generation else { return }
-                var rows: [Row] = []
-                for g in groups {
-                    rows.append(.header(g.section))
-                    rows += g.results.map { .result($0) }
-                }
-                self.rows = rows
-                self.shownQuery = query
-                self.table.reloadData()
-                // Size the list before selecting, so scrolling to the selection sees the real height.
-                self.resize()
-                self.panel.contentView?.layoutSubtreeIfNeeded()
-                self.scroll.contentView.scroll(to: NSPoint(x: 0, y: -self.scroll.contentInsets.top))
-                self.scroll.reflectScrolledClipView(self.scroll.contentView)
-                let keep = previous.flatMap { id in rows.firstIndex { $0.result?.id == id } }
-                self.select(keep ?? self.firstResultRow(), direction: 1)
-                self.updateCompletion()
+                self.apply(groups, query: query, keepID: previous)
             }
         }
+    }
+
+    private func apply(_ groups: [ResultGroup], query: String, keepID: String?) {
+        var rows: [Row] = []
+        for g in groups {
+            rows.append(.header(g.section))
+            rows += g.results.map { .result($0) }
+        }
+        self.rows = rows
+        shownQuery = query
+        table.reloadData()
+        // Size the list before selecting, so scrolling to the selection sees the real height.
+        resize()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: -scroll.contentInsets.top))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        let keep = keepID.flatMap { id in rows.firstIndex { $0.result?.id == id } }
+        select(keep ?? firstResultRow(), direction: 1)
+        updateCompletion()
     }
 
     /// Re-runs the current query, e.g. after the index finishes building.
@@ -514,10 +520,12 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     private func updateCompletion() {
         let typed = field.stringValue
         completion.stringValue = ""
-        guard !typed.isEmpty, mode != .clipboard, let top = results.first, top.kind != .web,
-              let editor = field.currentEditor() as? NSTextView,
-              editor.selectedRange().location == (typed as NSString).length, editor.selectedRange().length == 0
-        else { return }
+        guard !typed.isEmpty, mode != .clipboard, let top = results.first, top.kind != .web else { return }
+        if !promoMode {
+            guard let editor = field.currentEditor() as? NSTextView,
+                  editor.selectedRange().location == (typed as NSString).length, editor.selectedRange().length == 0
+            else { return }
+        }
         let width = (typed as NSString).size(withAttributes: [.font: field.font!]).width
         guard width < field.bounds.width - 120 else { return }
         var text: String
@@ -733,6 +741,39 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     func windowDidResignKey(_ notification: Notification) {
         if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible { return }
         hide()
+    }
+
+    // MARK: - Promo rendering
+
+    private(set) var promoMode = false
+
+    /// Puts the panel off screen, without taking keyboard focus, for frame-by-frame rendering.
+    func promoPrepare() {
+        promoMode = true
+        panel.appearance = NSAppearance(named: .darkAqua)
+        setFrame(NSRect(x: -8000, y: 400, width: Self.width, height: Self.headerHeight))
+        panel.orderFront(nil)
+        panel.makeFirstResponder(nil)
+        preview.useThumbnails = true
+    }
+
+    func promoSet(query: String, mode m: SearchMode) {
+        if m != mode { setMode(m, search: false) }
+        field.stringValue = query
+        let found = engine.search(query, mode: m, limit: 40)
+        apply(engine.grouped(found, mode: m, query: query), query: query, keepID: nil)
+    }
+
+    func promoMove(_ delta: Int) { select(table.selectedRow + delta, direction: delta) }
+
+    /// The panel's contents as an image with a transparent background, plus where the text caret belongs.
+    func promoRender() -> (image: NSBitmapImageRep, caret: NSRect)? {
+        guard let view = contentRoot, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let f = field.convert(field.bounds, to: view)
+        let width = (field.stringValue as NSString).size(withAttributes: [.font: field.font!]).width
+        let caret = NSRect(x: f.minX + 2 + width, y: f.midY - 13, width: 2, height: 26)
+        return (rep, caret)
     }
 
     // MARK: - Developer snapshot

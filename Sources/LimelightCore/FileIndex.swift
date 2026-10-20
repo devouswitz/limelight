@@ -275,6 +275,8 @@ public final class FileIndex: @unchecked Sendable {
         }
     }
 
+    public static func realPath(_ path: String) -> String { standardize(path) }
+
     /// Resolves symlinks the way FSEvents reports paths (/var → /private/var), even for paths that no longer exist.
     static func standardize(_ path: String) -> String {
         var p = path

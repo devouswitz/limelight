@@ -1,6 +1,7 @@
 import AppKit
 import LimelightCore
 import Quartz
+import QuickLookThumbnailing
 
 /// The right-hand pane: a Quick Look preview or large icon, then the details Spotlight shows.
 final class PreviewPane: NSView {
@@ -11,7 +12,10 @@ final class PreviewPane: NSView {
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
-    private var shownID: String?
+    private var shownKey: String?
+    /// Static Quick Look thumbnails instead of a live preview. The live view renders out of process,
+    /// so it never shows up when the panel is drawn into an image (the promo video).
+    var useThumbnails = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -32,8 +36,10 @@ final class PreviewPane: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func show(_ result: SearchResult?) {
-        guard result?.id != shownID || result?.kind == .calculation else { return }
-        shownID = result?.id
+        // Keyed on title too: the web-search row keeps one id while its query changes.
+        let key = result.map { $0.id + "\u{0}" + $0.title }
+        guard key != shownKey else { return }
+        shownKey = key
         for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
         guard let r = result else { return }
 
@@ -60,7 +66,21 @@ final class PreviewPane: NSView {
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()
         let isPackage = IndexConfig.packageExtensions.contains(ext)
-        if r.kind == .file && !isPackage {
+        if r.kind == .file && !isPackage && useThumbnails {
+            let thumb = NSImageView(image: Icons.image(for: r, size: 128))
+            thumb.imageScaling = .scaleProportionallyUpOrDown
+            thumb.translatesAutoresizingMaskIntoConstraints = false
+            thumb.heightAnchor.constraint(equalToConstant: 190).isActive = true
+            thumb.widthAnchor.constraint(equalToConstant: 380).isActive = true
+            stack.addArrangedSubview(thumb)
+            let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 380, height: 190), scale: 2, representationTypes: .thumbnail)
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { rep, _ in
+                guard let image = rep?.nsImage else { return }
+                DispatchQueue.main.async { thumb.image = image }
+            }
+            stack.addArrangedSubview(label(r.title, size: 15, weight: .semibold, lines: 2))
+            stack.addArrangedSubview(label(Icons.kindLabel(for: r), size: 12, color: .secondaryLabelColor))
+        } else if r.kind == .file && !isPackage {
             quickLook.previewItem = url as NSURL
             stack.addArrangedSubview(quickLook)
             NSLayoutConstraint.activate([

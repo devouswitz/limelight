@@ -44,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         wireSettings()
 
         let env = ProcessInfo.processInfo.environment
+        if let promo = env["LIMELIGHT_PROMO"] {
+            recordPromoWhenReady(to: URL(fileURLWithPath: promo))
+            return
+        }
         if let drag = env["LIMELIGHT_DRAG"] {
             let parts = drag.split(separator: ",").compactMap { Double($0) }
             search.testDrag(by: CGPoint(x: parts.first ?? 0, y: parts.last ?? 0)) { NSApp.terminate(nil) }
@@ -68,6 +72,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         search.show()
         return false
+    }
+
+    private func recordPromoWhenReady(to url: URL) {
+        guard !engine.catalog.isEmpty else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.recordPromoWhenReady(to: url) }
+            return
+        }
+        // Personal shortcuts stay out of a video meant for posting.
+        let catalog = engine.catalog.filter { !$0.key.hasPrefix("shortcut:") }
+        // Run from the run loop rather than a dispatch block: the recorder spins nested run loops,
+        // and those can only deliver main-queue callbacks (Quick Look thumbnails) from outside one.
+        RunLoop.main.perform {
+            do {
+                try PromoRecorder(output: url, catalog: catalog).run()
+                print("wrote \(url.path)")
+            } catch {
+                print("promo failed: \(error)")
+            }
+            NSApp.terminate(nil)
+        }
     }
 
     private func snapshotWhenIndexed(query: String, path: String) {

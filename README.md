@@ -98,4 +98,7 @@ Build output goes to `~/Library/Caches/Limelight-build`, because the attributes 
 swift test --scratch-path ~/Library/Caches/Limelight-build
 swift run --scratch-path ~/Library/Caches/Limelight-build -c release limelight-cli "query" "another query"
 scripts/snapshot.sh "query" out.png   # renders the panel for a query to a PNG
+LIMELIGHT_PROMO=$PWD/promo/limelight-promo.mp4 ~/Applications/Limelight.app/Contents/MacOS/Limelight   # renders the promo video
 ```
+
+The promo video is `promo/limelight-promo.mp4`. The app renders it from its own panel, driving a scripted session over sample files and sample clipboard entries. The frosted backdrop is composited, because the real glass is drawn by the window server.
