@@ -102,3 +102,5 @@ LIMELIGHT_PROMO=$PWD/promo/limelight-promo.mp4 ~/Applications/Limelight.app/Cont
 ```
 
 The promo video is `promo/limelight-promo.mp4`. The app renders it from its own panel, driving a scripted session over sample files and sample clipboard entries. The frosted backdrop is composited, because the real glass is drawn by the window server.
+
+Free and open source under the MIT license.
