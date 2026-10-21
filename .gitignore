@@ -3,3 +3,4 @@ build/
 .swiftpm/
 *.xcodeproj/xcuserdata/
 promo/limelight-promo-x.mp4
+.review/

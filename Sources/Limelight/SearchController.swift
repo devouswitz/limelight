@@ -13,7 +13,8 @@ final class SearchPanel: NSPanel {
     weak var quickLookSource: (QLPreviewPanelDataSource & QLPreviewPanelDelegate)?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: SearchController.width, height: SearchController.headerHeight),
+        let m = SearchController.shadowMargin
+        super.init(contentRect: NSRect(x: 0, y: 0, width: SearchController.width + 2 * m, height: SearchController.headerHeight + 2 * m),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isFloatingPanel = true
@@ -22,7 +23,9 @@ final class SearchPanel: NSPanel {
         hidesOnDeactivate = false
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
+        // The system shadow follows the window's square bounds whenever the panel has keyboard focus,
+        // which draws a near-square outline around the rounded glass. ShadowHost draws one instead.
+        hasShadow = false
         isMovable = false
         animationBehavior = .none
     }
@@ -66,6 +69,51 @@ final class SearchField: NSTextField {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// The window's root view: a transparent margin holding the glass and a rounded shadow behind it.
+/// Clicking the margin counts as clicking outside the panel.
+final class ShadowHost: NSView {
+    var onClickOutside: (() -> Void)?
+    private let shadowView = NSView()
+    private let content: NSView
+
+    init(content: NSView, margin: CGFloat, cornerRadius: CGFloat) {
+        self.cornerRadius = cornerRadius
+        self.content = content
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        shadowView.wantsLayer = true
+        shadowView.layer?.shadowColor = NSColor.black.cgColor
+        shadowView.layer?.shadowOpacity = 0.32
+        shadowView.layer?.shadowRadius = 20
+        shadowView.layer?.shadowOffset = CGSize(width: 0, height: -10)
+        for v in [shadowView, content] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: leadingAnchor, constant: margin),
+                v.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -margin),
+                v.topAnchor.constraint(equalTo: topAnchor, constant: margin),
+                v.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -margin),
+            ])
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private let cornerRadius: CGFloat
+
+    override func layout() {
+        super.layout()
+        shadowView.layer?.shadowPath = CGPath(roundedRect: shadowView.bounds, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if !content.frame.contains(point) { onClickOutside?() }
+    }
+}
+
 /// Dragging any empty part of the panel moves it. Clicks on controls never reach here;
 /// clicks on icons, labels and the preview pane pass up the responder chain and do.
 final class DragArea: NSView {
@@ -105,6 +153,8 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     static let sectionHeight: CGFloat = 26
     static let maxBodyHeight: CGFloat = 430
     static let minBodyHeight: CGFloat = 300
+    /// Transparent space around the glass for the shadow.
+    static let shadowMargin: CGFloat = 44
 
     let engine: SearchEngine
     weak var actions: LimelightActions?
@@ -294,7 +344,9 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             ])
             background = fx
         }
-        panel.contentView = background
+        let host = ShadowHost(content: background, margin: Self.shadowMargin, cornerRadius: 26)
+        host.onClickOutside = { [weak self] in self?.hide() }
+        panel.contentView = host
         applyMode()
     }
 
@@ -378,10 +430,15 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
     }
 
+    /// The glass's rectangle on screen; the window extends `shadowMargin` beyond it on every side.
+    private var panelFrame: NSRect {
+        panel.frame.insetBy(dx: Self.shadowMargin, dy: Self.shadowMargin)
+    }
+
     private func position() {
         guard let area = currentScreen?.visibleFrame else { return }
         let anchor = savedAnchor ?? CGPoint(x: 0.5, y: 0.8)
-        let height = panel.frame.height
+        let height = panelFrame.height
         var top = area.minY + anchor.y * area.height
         var x = area.minX + anchor.x * area.width - Self.width / 2
         x = min(max(x, area.minX), area.maxX - Self.width)
@@ -389,13 +446,14 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         setFrame(NSRect(x: x, y: top - height, width: Self.width, height: height))
     }
 
+    /// Places the glass at `frame`, growing the window by the shadow margin.
     private func setFrame(_ frame: NSRect) {
-        panel.setFrame(frame, display: true)
+        panel.setFrame(frame.insetBy(dx: -Self.shadowMargin, dy: -Self.shadowMargin), display: true)
     }
 
     private func savePosition() {
         guard let area = panel.screen?.visibleFrame else { return }
-        let f = panel.frame
+        let f = panelFrame
         savedAnchor = CGPoint(x: (f.midX - area.minX) / area.width, y: (f.maxY - area.minY) / area.height)
     }
 
@@ -408,12 +466,11 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         bodyHeight.constant = height
         divider.isHidden = rows.isEmpty
         body.isHidden = rows.isEmpty
-        var frame = panel.frame
+        var frame = panelFrame
         let top = frame.maxY
         frame.size.height = Self.headerHeight + (rows.isEmpty ? 0 : height + 1)
         frame.origin.y = top - frame.size.height
         setFrame(frame)
-        panel.invalidateShadow()
     }
 
     // MARK: - Modes
@@ -791,9 +848,14 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         if typeKeys {
             show()
         } else {
-            // Shown without taking keyboard focus, so a test run never captures what someone is typing.
+            // Normally shown without taking keyboard focus, so a test run never captures what someone is typing.
+            // LIMELIGHT_FOCUS=1 makes it the key window, which is how it looks in real use.
             position()
-            panel.orderFrontRegardless()
+            if ProcessInfo.processInfo.environment["LIMELIGHT_FOCUS"] != nil {
+                panel.makeKeyAndOrderFront(nil)
+            } else {
+                panel.orderFrontRegardless()
+            }
         }
         setMode(mode, search: false)
         if typeKeys {
@@ -834,8 +896,9 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     /// Drags the panel by its search icon with posted mouse events, then reports where it went.
     func testDrag(by delta: CGPoint, completion: @escaping () -> Void) {
         show()
+        panel.contentView?.layoutSubtreeIfNeeded()
         let before = panel.frame.origin
-        let start = NSPoint(x: 30, y: panel.frame.height - Self.headerHeight / 2)
+        let start = NSPoint(x: Self.shadowMargin + 30, y: panel.frame.height - Self.shadowMargin - Self.headerHeight / 2)
         func mouse(_ type: NSEvent.EventType, _ p: NSPoint) {
             if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                           windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
