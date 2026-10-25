@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
         let env = ProcessInfo.processInfo.environment
         // Developer runs (snapshots, the promo, the drag test) are short-lived second copies. They must not
         // take the shortcut, add a menu bar icon, watch files or write history, or they disturb the real one.
-        let devRun = ["LIMELIGHT_PROMO", "LIMELIGHT_DRAG", "LIMELIGHT_SNAPSHOT"].contains { env[$0] != nil }
+        let devRun = ["LIMELIGHT_PROMO", "LIMELIGHT_DRAG", "LIMELIGHT_SNAPSHOT", "LIMELIGHT_MOTION"].contains { env[$0] != nil }
         if !devRun, NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
             log.notice("another copy is already running; exiting")
@@ -51,6 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Limeli
 
         if let promo = env["LIMELIGHT_PROMO"] {
             recordPromoWhenReady(to: URL(fileURLWithPath: promo))
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.search.prewarm() }
+
+        if let dir = env["LIMELIGHT_MOTION"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                // LIMELIGHT_MOTION=trace logs opacity through an open and a close, and opening time.
+                if dir == "trace" { self?.search.traceMotion { NSApp.terminate(nil) } } else { NSApp.terminate(nil) }
+            }
             return
         }
         if let drag = env["LIMELIGHT_DRAG"] {

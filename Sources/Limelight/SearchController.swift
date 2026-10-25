@@ -151,8 +151,8 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     static let listWidth: CGFloat = 320
     static let rowHeight: CGFloat = 30
     static let sectionHeight: CGFloat = 26
-    static let maxBodyHeight: CGFloat = 430
-    static let minBodyHeight: CGFloat = 300
+    /// The results area has one size, like Spotlight's, so the panel only ever changes between two shapes.
+    static let bodyHeight: CGFloat = 400
     /// Transparent space around the glass for the shadow.
     static let shadowMargin: CGFloat = 44
 
@@ -372,7 +372,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
 
     // MARK: - Showing
 
-    func toggle() { panel.isVisible ? hide() : show() }
+    func toggle() { panel.isVisible && !isHiding ? hide() : show() }
 
     func show() {
         // Reopening shortly after closing keeps the last query, selected, like Spotlight.
@@ -382,23 +382,81 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
         engine.runningAppPaths = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
         updateStatus()
-        position()
-        search(field.stringValue)
+        let wasVisible = panel.isVisible
+        if !wasVisible { position() }
+        // Search before appearing, so the panel opens at its final size instead of growing a moment later.
+        searchNow(field.stringValue)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
+        animateIn(from: wasVisible ? panel.alphaValue : 0)
     }
 
-    func hide() {
-        guard panel.isVisible else { return }
+    func hide(animated: Bool = true) {
+        guard panel.isVisible, !isHiding else { return }
         if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
             QLPreviewPanel.shared().orderOut(nil)
         }
-        panel.orderOut(nil)
         lastHidden = Date()
-        // If anything activated Limelight, step aside so the previous app gets focus back.
-        if NSApp.isActive, !NSApp.windows.contains(where: { $0 !== panel && $0.isVisible && $0.canBecomeKey && !($0 is QLPreviewPanel) }) {
-            NSApp.hide(nil)
+        isHiding = true
+        motionToken += 1
+        let token = motionToken
+        let finish = { [weak self] in
+            guard let self, token == self.motionToken else { return }
+            self.isHiding = false
+            self.panel.orderOut(nil)
+            self.panel.alphaValue = 1
+            // If anything activated Limelight, step aside so the previous app gets focus back.
+            if NSApp.isActive, !NSApp.windows.contains(where: { $0 !== self.panel && $0.isVisible && $0.canBecomeKey && !($0 is QLPreviewPanel) }) {
+                NSApp.hide(nil)
+            }
+        }
+        guard animated else { finish(); return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.13
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        }, completionHandler: finish)
+    }
+
+    /// Lays the panel out and runs a search while hidden, so the first open after launch is as quick
+    /// as every later one (about 50 ms cold versus 10 ms warm).
+    func prewarm() {
+        guard !panel.isVisible else { return }
+        searchNow("")
+        panel.contentView?.layoutSubtreeIfNeeded()
+        // Ordering in once makes the window server build the window's surface and glass now rather than
+        // on the first real open. Fully transparent, off screen and without focus, so nothing shows.
+        let frame = panel.frame
+        panel.alphaValue = 0
+        panel.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        panel.orderFrontRegardless()
+        panel.displayIfNeeded()
+        DispatchQueue.main.async { [self] in
+            guard panel.alphaValue == 0 else { return }
+            panel.orderOut(nil)
+            panel.setFrame(frame, display: false)
+            panel.alphaValue = 1
+        }
+    }
+
+    // MARK: - Motion
+
+    private var motionToken = 0
+    private var isHiding = false
+
+    private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// Opening fades in with an ease-out. (A scale-up was tried; nothing that scales a window with
+    /// Liquid Glass works without breaking clicks, so the open is a fade only.)
+    private func animateIn(from alpha: CGFloat) {
+        motionToken += 1
+        isHiding = false
+        panel.alphaValue = alpha
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = reduceMotion ? 0.12 : 0.16
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
         }
     }
 
@@ -457,20 +515,36 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         savedAnchor = CGPoint(x: (f.midX - area.minX) / area.width, y: (f.maxY - area.minY) / area.height)
     }
 
-    private func resize() {
-        var listHeight: CGFloat = 12
-        for row in rows {
-            listHeight += (row.result == nil ? Self.sectionHeight : Self.rowHeight) + 1
-        }
-        let height = rows.isEmpty ? 0 : min(Self.maxBodyHeight, max(Self.minBodyHeight, listHeight))
-        bodyHeight.constant = height
-        divider.isHidden = rows.isEmpty
-        body.isHidden = rows.isEmpty
+    /// Switches between the bar and the expanded panel. Expanding reveals the results downward;
+    /// collapsing folds them back up.
+    private func resize(animated: Bool) {
+        let expanded = !rows.isEmpty
         var frame = panelFrame
         let top = frame.maxY
-        frame.size.height = Self.headerHeight + (rows.isEmpty ? 0 : height + 1)
+        frame.size.height = Self.headerHeight + (expanded ? Self.bodyHeight + 1 : 0)
         frame.origin.y = top - frame.size.height
-        setFrame(frame)
+        if expanded {
+            bodyHeight.constant = Self.bodyHeight
+            divider.isHidden = false
+            body.isHidden = false
+        }
+        let finish = { [weak self] in
+            guard let self, self.rows.isEmpty else { return }
+            self.divider.isHidden = true
+            self.body.isHidden = true
+        }
+        guard frame != panelFrame else { finish(); return }
+        guard animated, panel.isVisible, !reduceMotion else {
+            setFrame(frame)
+            finish()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = expanded ? 0.24 : 0.18
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.85, 0.25, 1)
+            ctx.allowsImplicitAnimation = true
+            panel.animator().setFrame(frame.insetBy(dx: -Self.shadowMargin, dy: -Self.shadowMargin), display: true)
+        }, completionHandler: finish)
     }
 
     // MARK: - Modes
@@ -489,7 +563,9 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
 
     private func applyMode() {
-        modeIcon.image = NSImage(systemSymbolName: Self.symbol(for: mode), accessibilityDescription: nil)
+        if let symbol = NSImage(systemSymbolName: Self.symbol(for: mode), accessibilityDescription: nil) {
+            if panel.isVisible { modeIcon.setSymbolImage(symbol, contentTransition: .replace) } else { modeIcon.image = symbol }
+        }
         modeIcon.contentTintColor = mode == .all ? .secondaryLabelColor : .controlAccentColor
         field.placeholderString = mode == .all ? "Limelight Search" : "Search " + Self.title(for: mode)
         for b in modeButtons {
@@ -518,7 +594,14 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
     }
 
-    private func apply(_ groups: [ResultGroup], query: String, keepID: String?) {
+    /// Runs the search on the spot, used when opening so the first frame already has results.
+    private func searchNow(_ query: String) {
+        generation += 1
+        let found = engine.search(query, mode: mode, limit: mode == .all ? 40 : 200)
+        apply(engine.grouped(found, mode: mode, query: query), query: query, keepID: nil, animated: false)
+    }
+
+    private func apply(_ groups: [ResultGroup], query: String, keepID: String?, animated: Bool = true) {
         var rows: [Row] = []
         for g in groups {
             rows.append(.header(g.section))
@@ -528,7 +611,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         shownQuery = query
         table.reloadData()
         // Size the list before selecting, so scrolling to the selection sees the real height.
-        resize()
+        resize(animated: animated)
         panel.contentView?.layoutSubtreeIfNeeded()
         scroll.contentView.scroll(to: NSPoint(x: 0, y: -scroll.contentInsets.top))
         scroll.reflectScrolledClipView(scroll.contentView)
@@ -896,32 +979,34 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     /// Drags the panel by its search icon with posted mouse events, then reports where it went.
     func testDrag(by delta: CGPoint, completion: @escaping () -> Void) {
         show()
-        panel.contentView?.layoutSubtreeIfNeeded()
-        let before = panel.frame.origin
-        let start = NSPoint(x: Self.shadowMargin + 30, y: panel.frame.height - Self.shadowMargin - Self.headerHeight / 2)
-        func mouse(_ type: NSEvent.EventType, _ p: NSPoint) {
-            if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                          windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
-                NSApp.postEvent(e, atStart: false)
+        // Drag once the panel has finished appearing, as a person would; a fully transparent window takes no clicks.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let before = panel.frame.origin
+            let start = NSPoint(x: Self.shadowMargin + 30, y: panel.frame.height - Self.shadowMargin - Self.headerHeight / 2)
+            func mouse(_ type: NSEvent.EventType, _ p: NSPoint) {
+                if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                    NSApp.postEvent(e, atStart: false)
+                }
             }
-        }
-        // Real drag events are reported relative to wherever the window is when they arrive.
-        let screenStart = panel.convertPoint(toScreen: start)
-        func at(_ fraction: CGFloat) -> NSPoint {
-            let target = NSPoint(x: screenStart.x + delta.x * fraction, y: screenStart.y + delta.y * fraction)
-            return panel.convertPoint(fromScreen: target)
-        }
-        mouse(.leftMouseDown, start)
-        for i in 1...10 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03 * Double(i)) { mouse(.leftMouseDragged, at(CGFloat(i) / 10)) }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { mouse(.leftMouseUp, at(1)) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
-            print("before=\(before) after=\(panel.frame.origin) saved=\(String(describing: savedAnchor))")
-            hide()
-            show()
-            print("reopened at \(panel.frame.origin)")
-            completion()
+            // Real drag events are reported relative to wherever the window is when they arrive.
+            let screenStart = panel.convertPoint(toScreen: start)
+            func at(_ fraction: CGFloat) -> NSPoint {
+                panel.convertPoint(fromScreen: NSPoint(x: screenStart.x + delta.x * fraction, y: screenStart.y + delta.y * fraction))
+            }
+            mouse(.leftMouseDown, start)
+            for i in 1...10 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03 * Double(i)) { mouse(.leftMouseDragged, at(CGFloat(i) / 10)) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { mouse(.leftMouseUp, at(1)) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
+                print("before=\(before) after=\(panel.frame.origin) saved=\(String(describing: savedAnchor))")
+                hide(animated: false)
+                show()
+                print("reopened at \(panel.frame.origin)")
+                completion()
+            }
         }
     }
 
@@ -933,6 +1018,26 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         let capture = unsafeBitCast(sym, to: Capture.self)
         // kCGWindowListOptionIncludingWindow = 8; image option 0 keeps the shadow framing.
         return capture(.null, 8, UInt32(panel.windowNumber), 0)?.takeRetainedValue()
+    }
+
+    /// Logs window opacity every 20 ms through an open and a close, and how long opening takes. Diagnostic only.
+    func traceMotion(completion: @escaping () -> Void) {
+        let start = Date()
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [self] _ in
+            print(String(format: "%.3f alpha %.2f visible %d", Date().timeIntervalSince(start), panel.alphaValue, panel.isVisible ? 1 : 0))
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        var t0 = CACurrentMediaTime()
+        show()
+        print(String(format: "show() took %.1f ms (cold)", (CACurrentMediaTime() - t0) * 1000))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in hide() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [self] in
+            timer.invalidate()
+            t0 = CACurrentMediaTime()
+            show()
+            print(String(format: "show() took %.1f ms (warm)", (CACurrentMediaTime() - t0) * 1000))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [self] in hide(animated: false); completion() }
+        }
     }
 
     private func postKey(_ ch: Character) {

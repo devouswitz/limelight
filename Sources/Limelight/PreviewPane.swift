@@ -24,6 +24,7 @@ final class PreviewPane: NSView {
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.wantsLayer = true
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -40,6 +41,11 @@ final class PreviewPane: NSView {
         let key = result.map { $0.id + "\u{0}" + $0.title }
         guard key != shownKey else { return }
         shownKey = key
+        // A quick cross-fade instead of a hard swap when the selection changes.
+        let fade = CATransition()
+        fade.type = .fade
+        fade.duration = 0.12
+        stack.layer?.add(fade, forKey: "swap")
         for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
         guard let r = result else { return }
 
